@@ -6,6 +6,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,12 +22,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -36,9 +39,11 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -55,9 +60,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -65,14 +76,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.rememberAsyncImagePainter
 import com.eal.lmstudiochat.data.ChatMessage
+import com.eal.lmstudiochat.data.ChatSummary
 import com.eal.lmstudiochat.data.RemoteModel
 import com.eal.lmstudiochat.data.Role
 import com.eal.lmstudiochat.ui.theme.AssistantBubble
 import com.eal.lmstudiochat.ui.theme.Danger
 import com.eal.lmstudiochat.ui.theme.Muted
 import com.eal.lmstudiochat.ui.theme.UserBubble
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -81,6 +97,8 @@ fun ChatScreen(
     onOpenSettings: () -> Unit,
 ) {
     val messages by viewModel.messages.collectAsState()
+    val chats by viewModel.chatList.collectAsState()
+    val activeChatId by viewModel.activeChatId.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val models by viewModel.models.collectAsState()
     val busy by viewModel.busy.collectAsState()
@@ -90,6 +108,20 @@ fun ChatScreen(
     var draft by remember { mutableStateOf("") }
     var pendingImage by remember { mutableStateOf<Uri?>(null) }
     var modelMenu by remember { mutableStateOf(false) }
+    var historyOpen by remember { mutableStateOf(false) }
+    var followTail by remember { mutableStateOf(true) }
+    var programmaticScroll by remember { mutableStateOf(false) }
+    val listState = remember(activeChatId) { LazyListState() }
+    val userScroll = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && !programmaticScroll) {
+                    followTail = false
+                }
+                return Offset.Zero
+            }
+        }
+    }
     val picker = rememberLauncherForActivityResult(PickVisualMedia()) { uri ->
         if (uri != null) pendingImage = uri
     }
@@ -141,11 +173,15 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    TextButton(onClick = viewModel::newChat) {
+                        Icon(Icons.Filled.Add, contentDescription = null)
+                        Text("Новый чат")
+                    }
+                    IconButton(onClick = { historyOpen = true }) {
+                        Icon(Icons.Filled.History, contentDescription = "История чатов")
+                    }
                     IconButton(onClick = viewModel::refreshModels) {
                         Icon(Icons.Filled.Refresh, contentDescription = "Обновить модели")
-                    }
-                    IconButton(onClick = viewModel::clearChat, enabled = messages.isNotEmpty()) {
-                        Icon(Icons.Filled.DeleteSweep, contentDescription = "Очистить чат")
                     }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Настройки")
@@ -164,6 +200,7 @@ fun ChatScreen(
                     picker.launch(PickVisualMediaRequest(PickVisualMedia.ImageOnly))
                 },
                 onSend = {
+                    followTail = true
                     viewModel.send(draft, pendingImage)
                     draft = ""
                     pendingImage = null
@@ -172,12 +209,40 @@ fun ChatScreen(
             )
         },
     ) { padding ->
-        val listState = rememberLazyListState()
         val tail = messages.lastOrNull()
-        LaunchedEffect(messages.size, tail?.text, tail?.reasoning) {
-            if (messages.isNotEmpty()) {
-                listState.animateScrollToItem(messages.lastIndex)
+        LaunchedEffect(activeChatId) { followTail = true }
+        LaunchedEffect(listState) {
+            snapshotFlow {
+                val info = listState.layoutInfo
+                val last = info.visibleItemsInfo.lastOrNull()
+                val atEnd = last != null &&
+                    last.index == info.totalItemsCount - 1 &&
+                    last.offset + last.size <= info.viewportEndOffset + 48
+                atEnd to listState.isScrollInProgress
+            }.distinctUntilChanged().collect { (atEnd, scrolling) ->
+                if (atEnd && !scrolling) followTail = true
             }
+        }
+        LaunchedEffect(activeChatId, messages.size, tail?.text, tail?.reasoning) {
+            if (messages.isEmpty() || !followTail) return@LaunchedEffect
+            programmaticScroll = true
+            try {
+                listState.revealEnd()
+            } finally {
+                programmaticScroll = false
+            }
+        }
+        if (historyOpen) {
+            HistorySheet(
+                chats = chats,
+                activeId = activeChatId,
+                onDismiss = { historyOpen = false },
+                onOpen = { id ->
+                    viewModel.openChat(id)
+                    historyOpen = false
+                },
+                onDelete = viewModel::deleteChat,
+            )
         }
         if (messages.isEmpty()) {
             Box(
@@ -193,7 +258,10 @@ fun ChatScreen(
         } else {
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().padding(padding),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .nestedScroll(userScroll),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -358,6 +426,86 @@ private fun Composer(
                 }
             }
         }
+    }
+}
+
+private suspend fun LazyListState.revealEnd() {
+    val count = layoutInfo.totalItemsCount
+    if (count == 0) return
+    val last = count - 1
+    if (layoutInfo.visibleItemsInfo.none { it.index == last }) {
+        scrollToItem(last)
+        withFrameNanos { }
+    }
+    val info = layoutInfo
+    val item = info.visibleItemsInfo.lastOrNull { it.index == last } ?: return
+    val delta = item.offset + item.size - info.viewportEndOffset
+    if (delta > 1) {
+        scroll { scrollBy(delta.toFloat()) }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HistorySheet(
+    chats: List<ChatSummary>,
+    activeId: String,
+    onDismiss: () -> Unit,
+    onOpen: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    val formatter = remember { SimpleDateFormat("d MMM, HH:mm", Locale("ru")) }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Text(
+            "История чатов",
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            style = MaterialTheme.typography.titleLarge,
+        )
+        if (chats.isEmpty()) {
+            Text(
+                "Пока нет сохранённых чатов",
+                modifier = Modifier.padding(20.dp),
+                color = Muted,
+            )
+        }
+        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
+            items(chats, key = { it.id }) { chat ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpen(chat.id) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(horizontal = 8.dp)) {
+                        Text(
+                            chat.title,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = if (chat.id == activeId) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            buildString {
+                                if (chat.updatedAt > 0) {
+                                    append(formatter.format(Date(chat.updatedAt)))
+                                    append(" · ")
+                                }
+                                append(chat.preview)
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = Muted,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    IconButton(onClick = { onDelete(chat.id) }) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Удалить чат")
+                    }
+                }
+                HorizontalDivider()
+            }
+        }
+        Spacer(Modifier.height(24.dp))
     }
 }
 

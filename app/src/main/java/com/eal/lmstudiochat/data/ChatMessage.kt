@@ -23,3 +23,17 @@ data class RemoteModel(
     val vision: Boolean,
     val loaded: Boolean,
 )
+
+data class StoredChat(
+    val id: String = UUID.randomUUID().toString(),
+    val title: String = "Новый чат",
+    val updatedAt: Long = System.currentTimeMillis(),
+    val messages: List<ChatMessage> = emptyList(),
+)
+
+data class ChatSummary(
+    val id: String,
+    val title: String,
+    val updatedAt: Long,
+    val preview: String,
+)

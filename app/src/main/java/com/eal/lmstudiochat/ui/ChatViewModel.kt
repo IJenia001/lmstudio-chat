@@ -9,8 +9,12 @@ import androidx.lifecycle.viewmodel.CreationExtras
 import com.eal.lmstudiochat.LmApplication
 import com.eal.lmstudiochat.data.AppSettings
 import com.eal.lmstudiochat.data.ChatMessage
+import com.eal.lmstudiochat.data.ChatSummary
 import com.eal.lmstudiochat.data.RemoteModel
 import com.eal.lmstudiochat.data.Role
+import com.eal.lmstudiochat.data.StoredChat
+import com.eal.lmstudiochat.data.chatPreview
+import com.eal.lmstudiochat.data.chatTitle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,6 +42,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages
 
+    private val _chats = MutableStateFlow<List<StoredChat>>(emptyList())
+    private val _chatList = MutableStateFlow<List<ChatSummary>>(emptyList())
+    val chatList: StateFlow<List<ChatSummary>> = _chatList
+
+    private val _activeChatId = MutableStateFlow("")
+    val activeChatId: StateFlow<String> = _activeChatId
+
     private val _models = MutableStateFlow<List<RemoteModel>>(emptyList())
     val models: StateFlow<List<RemoteModel>> = _models
 
@@ -51,7 +62,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
-            _messages.value = withContext(Dispatchers.IO) { chatStore.load() }
+            val loaded = withContext(Dispatchers.IO) { chatStore.loadLibrary() }
+            val newest = loaded.maxByOrNull { it.updatedAt } ?: StoredChat()
+            _chats.value = loaded
+            _activeChatId.value = newest.id
+            _messages.value = newest.messages
+            publishChatList()
             refreshModels()
         }
     }
@@ -83,6 +99,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun send(text: String, imageUri: Uri?) {
         val trimmed = text.trim()
         if (trimmed.isEmpty() && imageUri == null) return
+        if (_activeChatId.value.isBlank()) return
         if (generation?.isActive == true) return
 
         generation = viewModelScope.launch {
@@ -112,7 +129,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
             val assistant = ChatMessage(role = Role.Assistant, text = "")
             val history = _messages.value + userMessage
-            _messages.value = history + assistant
+            setMessages(history + assistant)
             persist()
 
             try {
@@ -165,13 +182,50 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { persist() }
     }
 
-    fun clearChat() {
-        generation?.cancel()
+    fun newChat() {
         viewModelScope.launch {
-            val snapshot = _messages.value
-            _messages.value = emptyList()
-            _busy.value = false
-            withContext(Dispatchers.IO) { chatStore.clear(snapshot) }
+            finishGeneration()
+            if (_messages.value.isEmpty()) return@launch
+            val chat = StoredChat()
+            _chats.value = listOf(chat) + _chats.value
+            _activeChatId.value = chat.id
+            setMessages(emptyList())
+            persist()
+        }
+    }
+
+    fun openChat(id: String) {
+        if (id == _activeChatId.value) return
+        viewModelScope.launch {
+            finishGeneration()
+            val chat = _chats.value.firstOrNull { it.id == id } ?: return@launch
+            _activeChatId.value = chat.id
+            setMessages(chat.messages)
+        }
+    }
+
+    fun deleteChat(id: String) {
+        viewModelScope.launch {
+            if (id == _activeChatId.value) finishGeneration()
+            val target = _chats.value.firstOrNull { it.id == id } ?: return@launch
+            withContext(Dispatchers.IO) { chatStore.deleteImages(target.messages) }
+            val remaining = _chats.value.filterNot { it.id == id }
+            if (remaining.isEmpty()) {
+                val fresh = StoredChat()
+                _chats.value = listOf(fresh)
+                _activeChatId.value = fresh.id
+                setMessages(emptyList())
+            } else {
+                _chats.value = remaining
+                if (_activeChatId.value == id) {
+                    val next = remaining.maxBy { it.updatedAt }
+                    _activeChatId.value = next.id
+                    setMessages(next.messages)
+                } else {
+                    publishChatList()
+                }
+            }
+            persist()
         }
     }
 
@@ -179,13 +233,50 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _status.value = null
     }
 
+    private suspend fun finishGeneration() {
+        val job = generation ?: return
+        job.cancel()
+        job.join()
+    }
+
     private fun replace(id: String, transform: (ChatMessage) -> ChatMessage) {
-        _messages.value = _messages.value.map { if (it.id == id) transform(it) else it }
+        setMessages(_messages.value.map { if (it.id == id) transform(it) else it })
+    }
+
+    private fun setMessages(messages: List<ChatMessage>) {
+        _messages.value = messages
+        val id = _activeChatId.value
+        if (id.isBlank()) return
+        _chats.value = _chats.value.map { chat ->
+            if (chat.id != id) {
+                chat
+            } else {
+                chat.copy(
+                    messages = messages,
+                    title = chatTitle(messages),
+                    updatedAt = System.currentTimeMillis(),
+                )
+            }
+        }
+        publishChatList()
+    }
+
+    private fun publishChatList() {
+        _chatList.value = _chats.value
+            .sortedByDescending { it.updatedAt }
+            .map { chat ->
+                ChatSummary(
+                    id = chat.id,
+                    title = chat.title,
+                    updatedAt = chat.updatedAt,
+                    preview = chatPreview(chat.messages),
+                )
+            }
     }
 
     private suspend fun persist() {
-        val snapshot = _messages.value
-        withContext(Dispatchers.IO) { chatStore.save(snapshot) }
+        val snapshot = _chats.value
+        withContext(Dispatchers.IO) { chatStore.saveLibrary(snapshot) }
     }
 
     companion object {
