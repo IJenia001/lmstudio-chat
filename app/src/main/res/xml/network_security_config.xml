@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- LM Studio on the LAN speaks plain HTTP. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
