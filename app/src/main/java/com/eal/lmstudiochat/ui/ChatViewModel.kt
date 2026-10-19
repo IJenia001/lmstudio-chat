@@ -133,21 +133,38 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             persist()
 
             try {
+                var accText = ""
+                var accReason = ""
+                var truncated = false
+                var lastFlush = 0L
+                suspend fun flush(force: Boolean) {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (!force && now - lastFlush < 80) return
+                    lastFlush = now
+                    val textSnapshot = accText
+                    val reasonSnapshot = accReason
+                    val truncatedSnapshot = truncated
+                    withContext(Dispatchers.Main) {
+                        replace(assistant.id) {
+                            it.copy(
+                                text = textSnapshot,
+                                reasoning = reasonSnapshot,
+                                truncated = truncatedSnapshot,
+                            )
+                        }
+                    }
+                }
                 client.streamChat(
                     settings = settings,
                     history = history,
                     imageDataUrl = chatStore::imageDataUrl,
                 ) { piece ->
-                    withContext(Dispatchers.Main) {
-                        replace(assistant.id) {
-                            it.copy(
-                                text = it.text + piece.content,
-                                reasoning = it.reasoning + piece.reasoning,
-                                truncated = it.truncated || piece.finishReason == "length",
-                            )
-                        }
-                    }
+                    accText += piece.content
+                    accReason += piece.reasoning
+                    if (piece.finishReason == "length") truncated = true
+                    flush(piece.finishReason != null)
                 }
+                flush(true)
                 val last = _messages.value.lastOrNull { it.id == assistant.id }
                 if (last != null && last.text.isBlank() && last.reasoning.isBlank()) {
                     replace(assistant.id) {

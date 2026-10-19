@@ -64,7 +64,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -76,8 +75,6 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.rememberAsyncImagePainter
-import com.mikepenz.markdown.m3.Markdown
-import com.mikepenz.markdown.m3.markdownColor
 import com.eal.lmstudiochat.data.ChatMessage
 import com.eal.lmstudiochat.data.ChatSummary
 import com.eal.lmstudiochat.data.RemoteModel
@@ -351,14 +348,9 @@ private fun MessageBubble(
                     if (mine || message.error) {
                         Text(body, style = MaterialTheme.typography.bodyLarge)
                     } else {
-                        Markdown(
-                            content = body,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = markdownColor(
-                                text = Color(0xFFE7EADF),
-                                codeBackground = Color(0xFF161914),
-                                inlineCodeBackground = Color(0xFF161914),
-                            ),
+                        MarkdownText(
+                            text = body,
+                            color = MaterialTheme.colorScheme.onSurface,
                         )
                     }
                 } else if (waiting) {

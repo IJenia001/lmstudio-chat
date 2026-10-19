@@ -188,7 +188,64 @@ class LmStudioClient {
                 )
             }
         }
-        return messages
+        return alternateRoles(messages)
+    }
+
+    /**
+     * Gemma and similar chat templates reject a history where two user or two
+     * assistant messages follow each other. Failed replies are omitted, so the
+     * next user message has to be merged into the previous one.
+     */
+    private fun alternateRoles(messages: JSONArray): JSONArray {
+        val out = JSONArray()
+        val dialog = mutableListOf<JSONObject>()
+        for (i in 0 until messages.length()) {
+            val message = messages.getJSONObject(i)
+            val role = message.optString("role")
+            if (role == "system" && dialog.isEmpty() && out.length() == 0) {
+                out.put(message)
+                continue
+            }
+            if (role != "user" && role != "assistant") continue
+            if (dialog.isEmpty()) {
+                if (role == "assistant") continue
+                dialog += message
+                continue
+            }
+            val previous = dialog.last()
+            if (previous.optString("role") == role) {
+                dialog[dialog.lastIndex] = mergeMessages(previous, message)
+            } else {
+                dialog += message
+            }
+        }
+        dialog.forEach { out.put(it) }
+        return out
+    }
+
+    private fun mergeMessages(left: JSONObject, right: JSONObject): JSONObject {
+        val leftContent = left.get("content")
+        val rightContent = right.get("content")
+        val content = if (leftContent is String && rightContent is String) {
+            leftContent.trimEnd() + "\n\n" + rightContent.trimStart()
+        } else {
+            val parts = JSONArray()
+            appendContent(parts, leftContent)
+            appendContent(parts, rightContent)
+            parts
+        }
+        return JSONObject()
+            .put("role", left.optString("role"))
+            .put("content", content)
+    }
+
+    private fun appendContent(parts: JSONArray, content: Any) {
+        when (content) {
+            is JSONArray -> {
+                for (i in 0 until content.length()) parts.put(content.get(i))
+            }
+            else -> parts.put(JSONObject().put("type", "text").put("text", content.toString()))
+        }
     }
 
     private fun parseNativeModels(json: JSONObject): List<RemoteModel> {
@@ -242,9 +299,26 @@ class LmStudioClient {
             json.optJSONObject("error")?.stringOrEmpty("message")
                 ?: json.stringOrEmpty("message")
         }.getOrNull().orEmpty()
-        if (fromJson.isNotBlank()) return fromJson
+        if (fromJson.isNotBlank()) return readableError(fromJson)
         if (code == 401) return "Сервер отклонил API-key"
         return "Ошибка сервера ($code)"
+    }
+
+    private fun readableError(raw: String): String {
+        val text = raw
+            .replace("\\r\\n", "\n")
+            .replace("\\n", "\n")
+            .replace("\\t", " ")
+        val errorLine = text.lineSequence()
+            .map { it.trim().trim('"', '\'', ',', ' ') }
+            .lastOrNull { it.startsWith("Error:") || it.contains("Exception:") }
+            ?.removePrefix("Error:")
+            ?.trim()
+            .orEmpty()
+        val message = errorLine.ifBlank { text.trim() }
+        return message
+            .replace(Regex("\\s+"), " ")
+            .take(400)
     }
 
     private fun JSONObject.stringOrEmpty(key: String): String {
