@@ -1,10 +1,15 @@
 package com.eal.lmstudiochat.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -12,6 +17,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -74,6 +80,8 @@ fun MarkdownText(
                     color = color,
                     style = MaterialTheme.typography.bodyLarge,
                 )
+                is MdBlock.Rule -> HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                is MdBlock.Table -> MarkdownTable(block.rows, color)
             }
         }
     }
@@ -85,6 +93,47 @@ private sealed interface MdBlock {
     data class Bullet(val ordered: Boolean, val marker: String, val text: String) : MdBlock
     data class Quote(val text: String) : MdBlock
     data class Code(val text: String) : MdBlock
+    data class Table(val rows: List<List<String>>) : MdBlock
+    data object Rule : MdBlock
+}
+
+@Composable
+private fun MarkdownTable(rows: List<List<String>>, color: Color) {
+    val columns = rows.maxOf { it.size }
+    Surface(
+        color = Color(0xFF161914),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.horizontalScroll(rememberScrollState())) {
+            rows.forEachIndexed { rowIndex, rawCells ->
+                val cells = List(columns) { index -> rawCells.getOrElse(index) { "" } }
+                if (rowIndex > 0) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+                }
+                Row(
+                    modifier = if (rowIndex == 0) {
+                        Modifier.background(Color(0xFF22261E))
+                    } else {
+                        Modifier
+                    },
+                ) {
+                    cells.forEach { cell ->
+                        Text(
+                            text = inlineMarkdown(cell),
+                            color = color,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (rowIndex == 0) FontWeight.SemiBold else FontWeight.Normal,
+                            textAlign = TextAlign.Start,
+                            modifier = Modifier
+                                .width(176.dp)
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 private fun markdownBlocks(source: String): List<MdBlock> {
@@ -151,6 +200,23 @@ private fun markdownBlocks(source: String): List<MdBlock> {
             index += 1
             continue
         }
+        if (isHorizontalRule(trimmed)) {
+            flushParagraph()
+            blocks += MdBlock.Rule
+            index += 1
+            continue
+        }
+        if (isTableHeader(lines, index)) {
+            flushParagraph()
+            val rows = mutableListOf(splitCells(trimmed))
+            index += 2
+            while (index < lines.size && isTableRow(lines[index])) {
+                rows += splitCells(lines[index].trim())
+                index += 1
+            }
+            blocks += MdBlock.Table(rows)
+            continue
+        }
         if (paragraph.isNotEmpty()) paragraph.append(' ')
         paragraph.append(trimmed)
         index += 1
@@ -158,6 +224,36 @@ private fun markdownBlocks(source: String): List<MdBlock> {
     flushParagraph()
     return blocks.ifEmpty { listOf(MdBlock.Paragraph(source)) }
 }
+
+private fun isHorizontalRule(line: String): Boolean = line.matches(Regex("^([-*_])\\1{2,}$"))
+
+private fun isTableHeader(lines: List<String>, index: Int): Boolean {
+    if (index + 1 >= lines.size) return false
+    val header = lines[index].trim()
+    if (!header.contains('|')) return false
+    return isSeparatorLine(lines[index + 1].trim())
+}
+
+private fun isTableRow(line: String): Boolean {
+    val trimmed = line.trim()
+    return trimmed.contains('|') && !isSeparatorLine(trimmed)
+}
+
+private fun isSeparatorLine(line: String): Boolean {
+    if (!line.contains('|')) return false
+    val cells = splitCells(line)
+    return cells.isNotEmpty() && cells.all { separatorCell.matches(it) }
+}
+
+private fun splitCells(line: String): List<String> {
+    var text = line.trim()
+    if (text.startsWith("|")) text = text.removePrefix("|")
+    if (text.endsWith("|")) text = text.removeSuffix("|")
+    if (text.isEmpty()) return emptyList()
+    return text.split('|').map { it.trim() }
+}
+
+private val separatorCell = Regex("^:?-{3,}:?$")
 
 private fun inlineMarkdown(source: String): AnnotatedString = buildAnnotatedString {
     var index = 0
